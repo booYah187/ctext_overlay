@@ -25,11 +25,8 @@ namespace {
 	std::unordered_map<std::string, ctext::io::FileEntry*> overridenFilepaths;
 
 	//[OVERLAY] Loose-file overlay fallback table: keys are
-	// "<option>/<value>/<original-path>" normalized to lowercase with
-	// forward slashes (relative to mods/options/), populated by
-	// ScanLooseOptionOverlays() below. Kept separate from
-	// overridenFilepaths so mod overrides and option overrides never
-	// interact unintentionally.
+	// "<option>/<value>/<original-path>" lowercased with forward slashes
+	// (relative to mods/options/), populated by ScanLooseOptionOverlays().
 	std::unordered_map<std::string, ctext::io::FileEntry*> overridenOptionPaths;
 
 	//[OVERLAY] Walks mods/options/<name>/<value>/... and registers every file
@@ -86,7 +83,7 @@ namespace {
 			return nullptr;
 
 		for (const auto& opt : ctext::overlay::Options::List()) {
-			// 1. resources.bin overlay entry (authoritative within this option).
+			// 1a. resources.bin probe, original case (PC bin naming).
 			auto binPath = ctext::overlay::BuildBinPath(opt, originalPath);
 
 			ctext::overlay::Options::Log("[overlay]   bin probe: " + binPath);
@@ -94,10 +91,19 @@ namespace {
 			if (uint8_t* buf = binProbe(binPath))
 				return buf;
 
+			// 1b. resources.bin probe, lowercased (pm/nx-style bin naming).
+			auto binPathLower = ctext::overlay::BuildBinPathLower(opt, originalPath);
+
+			if (binPathLower != binPath) {
+				ctext::overlay::Options::Log(
+					"[overlay]   bin probe (lc): " + binPathLower);
+
+				if (uint8_t* buf = binProbe(binPathLower))
+					return buf;
+			}
+
 			// 2. Loose-file fallback: mods/options/<name>/<value>/<path>.
 			auto key = ctext::overlay::BuildDiskKey(opt, originalPath);
-
-			ctext::overlay::Options::Log("[overlay]   disk probe: " + key);
 
 			if (overridenOptionPaths.contains(key))
 				return overridenOptionPaths[key]->GetData(outLen);
@@ -107,19 +113,14 @@ namespace {
 	}
 
 
-	//[OVERLAY] Safe config access. ctext's Config::Get() throws
-	// (json.type_error.302) when a boolean key in ctext.json is null or
-	// absent — which killed DLL load before any of our code ran. This
-	// wrapper caches the result of a successful read and falls back to
-	// sensible defaults on failure. Remove once upstream Config handles
-	// missing keys gracefully.
+	//[OVERLAY] Safe config access (Config::Get() throws type_error.302 on
+	// null/missing boolean keys in ctext.json).
 	bool GetModsEnabledSafe() {
 		try {
 			return ctext::Config::Get().ModsEnabled;
 		} catch (const std::exception& e) {
 			ctext::overlay::Options::Log(
-				std::string("[overlay] Config::Get() threw: ") + e.what() +
-				" (check ctext.json for missing/null boolean keys)");
+				std::string("[overlay] Config::Get() threw: ") + e.what());
 			return false;
 		}
 	}
@@ -159,7 +160,7 @@ namespace {
 		DETCHMAN_RESOURCE_LOAD_FILE_ENTRY,
 		const std::string&, filename, size_t*, outLen
 	) {
-		//[OVERLAY] unconditional trace: proves/disproves hook firing
+		//[OVERLAY] unconditional trace
 		ctext::overlay::Options::Log("[overlay] HOOK BODY: " + filename);
 
 #if LOG_RES_HOOK
@@ -167,8 +168,7 @@ namespace {
 #endif
 
 		//[OVERLAY] Option overlay takes precedence over mod overrides and
-		// default assets. binProbe lambda = "call the ORIGINAL loader with
-		// a rewritten path".
+		// default assets.
 		if (uint8_t* buf = TryOptionOverlay(
 			    filename,
 			    outLen,
@@ -208,10 +208,13 @@ export namespace ctext::hooks {
 		ctext::overlay::Options::Log("[overlay] Initialise called");
 
 		//[OVERLAY] Register loose option overlays. Exception-guarded.
-		ScanLooseOptionOverlays();   //[OVERLAY] add
+		ScanLooseOptionOverlays();
 
-		//[OVERLAY] Mod loading, fully guarded: mod-loading failures must
-		// never abort DLL load or take the overlay system down.
+		//[OVERLAY] Parse options as early as possible (post-DllMain safe,
+		// logging demonstrably works during this window).
+		ctext::overlay::Options::InitLogging();
+
+		//[OVERLAY] Mod loading, fully guarded.
 		try {
 			const bool modsEnabled = GetModsEnabledSafe();
 
