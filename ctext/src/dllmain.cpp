@@ -1,5 +1,3 @@
-module;
-
 #include <MinHook.h>
 
 #include <cstdio>
