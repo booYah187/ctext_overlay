@@ -16,21 +16,13 @@ import :sound_task;
 import :sqex_logo_scene;
 import :text_manager;
 
-import ctext.overlay.options;   //[OVERLAY] add
-
-import std;
 
 export namespace ctext::hooks {
 	void InitialiseHooks() {
-		//[OVERLAY] trace: prove Initialise runs
-		ctext::overlay::Options::Log("[overlay] InitialiseHooks called");
 		InitialiseDetchmanResourceHooks();
 	}
 
 	void EnableHooks() {
-		//[OVERLAY] trace: prove Enable runs
-		ctext::overlay::Options::Log("[overlay] EnableHooks called");
-
 		EnableCtrHooks();
 		EnableCtrResourceManagerHooks();
 		EnableDetchmanResourceHooks();
