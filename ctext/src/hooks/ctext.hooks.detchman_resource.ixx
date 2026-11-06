@@ -33,8 +33,7 @@ namespace {
 	std::unordered_map<std::string, ctext::io::FileEntry*> overridenOptionPaths;
 
 	//[OVERLAY] Walks mods/options/<name>/<value>/... and registers every file
-	// found there as a FilesystemFileEntry. Fully exception-guarded: any
-	// error is logged and swallowed instead of propagating during DLL load.
+	// found there as a FilesystemFileEntry. Fully exception-guarded.
 	void ScanLooseOptionOverlays() {
 		const std::filesystem::path optionsRoot = "mods/options";
 
@@ -75,7 +74,6 @@ namespace {
 		size_t* outLen,
 		auto&& binProbe
 	) {
-		//[OVERLAY] ensure options are parsed
 		ctext::overlay::Options::InitLogging();
 
 		ctext::overlay::Options::Log(
@@ -109,10 +107,25 @@ namespace {
 	}
 
 
-	void LoadCtpArchive(const std::filesystem::path& path) {
-		ctext::overlay::Options::Log(
-			"[overlay] LoadCtpArchive: " + path.generic_string());
+	//[OVERLAY] Safe config access. ctext's Config::Get() throws
+	// (json.type_error.302) when a boolean key in ctext.json is null or
+	// absent — which killed DLL load before any of our code ran. This
+	// wrapper caches the result of a successful read and falls back to
+	// sensible defaults on failure. Remove once upstream Config handles
+	// missing keys gracefully.
+	bool GetModsEnabledSafe() {
+		try {
+			return ctext::Config::Get().ModsEnabled;
+		} catch (const std::exception& e) {
+			ctext::overlay::Options::Log(
+				std::string("[overlay] Config::Get() threw: ") + e.what() +
+				" (check ctext.json for missing/null boolean keys)");
+			return false;
+		}
+	}
 
+
+	void LoadCtpArchive(const std::filesystem::path& path) {
 		const auto ctpFilename = path.generic_string();
 
 		auto ctp = new mz_zip_archive{ 0 };
@@ -138,9 +151,6 @@ namespace {
 				static_cast<size_t>(fileStat.m_uncomp_size)
 			);
 		}
-
-		ctext::overlay::Options::Log(
-			"[overlay] LoadCtpArchive done: " + ctpFilename);
 	}
 
 
@@ -194,49 +204,29 @@ namespace {
 
 export namespace ctext::hooks {
 	void InitialiseDetchmanResourceHooks() {
-		//[OVERLAY] unconditional trace
+		//[OVERLAY] trace
 		ctext::overlay::Options::Log("[overlay] Initialise called");
 
 		//[OVERLAY] Register loose option overlays. Exception-guarded.
 		ScanLooseOptionOverlays();   //[OVERLAY] add
 
-		//[OVERLAY] Everything below this point is mod loading, which has
-		// been determined to be where the process dies. Wrap the ENTIRE
-		// section in try/catch: mod-loading failures must never abort DLL
-		// load or take the overlay system down with them. Fine-grained
-		// traces bisect exactly which step dies.
+		//[OVERLAY] Mod loading, fully guarded: mod-loading failures must
+		// never abort DLL load or take the overlay system down.
 		try {
-			ctext::overlay::Options::Log("[overlay] init: about to Config::Get()");
+			const bool modsEnabled = GetModsEnabledSafe();
 
-			const auto& cfg = ctext::Config::Get();
-
-			ctext::overlay::Options::Log(
-				std::string("[overlay] init: ModsEnabled=") +
-				(cfg.ModsEnabled ? "true" : "false"));
-
-			if (!cfg.ModsEnabled)
+			if (!modsEnabled)
 				return;
 
-			if (!std::filesystem::exists("mods")) {
-				ctext::overlay::Options::Log("[overlay] init: no mods dir");
+			if (!std::filesystem::exists("mods"))
 				return;
-			}
-
-			ctext::overlay::Options::Log("[overlay] init: iterating mod load order");
 
 			const auto& loadOrder = ctext::Config::Get().ModsLoadOrder;
-
-			ctext::overlay::Options::Log(
-				"[overlay] init: load order size=" +
-				std::to_string(loadOrder.size()));
 
 			for (const auto& load : loadOrder) {
 				auto modPath = "mods" / std::filesystem::path(load);
 
-				ctext::overlay::Options::Log(
-					"[overlay] init: processing mod '" + load + "'");
-
-				if (cfg.ModsEnableCtpLoading) {
+				if (ctext::Config::Get().ModsEnableCtpLoading) {
 					std::filesystem::path ctpPath(modPath);
 					ctpPath.replace_extension(".ctp");
 
@@ -249,13 +239,8 @@ export namespace ctext::hooks {
 
 				if (!std::filesystem::exists(modPath)) {
 					LOG_ERROR("Mod path not found '" << load << "'!");
-					ctext::overlay::Options::Log(
-						"[overlay] init: mod path not found '" + load + "'");
 					continue;
 				}
-
-				ctext::overlay::Options::Log(
-					"[overlay] init: walking loose mod dir '" + load + "'");
 
 				const auto iter = std::filesystem::recursive_directory_iterator(modPath);
 
@@ -276,12 +261,7 @@ export namespace ctext::hooks {
 					if (!overridenFilepaths.contains(str))
 						overridenFilepaths[str] = new io::FilesystemFileEntry(filePath.path().string());
 				}
-
-				ctext::overlay::Options::Log(
-					"[overlay] init: mod done '" + load + "'");
 			}
-
-			ctext::overlay::Options::Log("[overlay] init: mod loading complete");
 		} catch (const std::exception& e) {
 			ctext::overlay::Options::Log(
 				std::string("[overlay] EXCEPTION in mod loading: ") + e.what());
@@ -292,27 +272,28 @@ export namespace ctext::hooks {
 	}
 
 	void EnableDetchmanResourceHooks() {
-		//[OVERLAY] unconditional trace + ensure options parsed
+		//[OVERLAY] trace + ensure options parsed
 		ctext::overlay::Options::Log("[overlay] Enable called");
 
 		ctext::overlay::Options::InitLogging();
 
-		ctext::overlay::Options::Log(
-			std::string("[overlay] ModsEnabled=") +
-			(ctext::Config::Get().ModsEnabled ? "true" : "false"));
+		const bool modsEnabled = GetModsEnabledSafe();
 
 		const bool overlayActive = !ctext::overlay::Options::Empty();
 
 		ctext::overlay::Options::Log(
+			std::string("[overlay] ModsEnabled=") +
+			(modsEnabled ? "true" : "false"));
+		ctext::overlay::Options::Log(
 			std::string("[overlay] overlayActive=") +
 			(overlayActive ? "true" : "false"));
 
-		if (ctext::Config::Get().ModsEnabled || overlayActive)
+		if (modsEnabled || overlayActive)
 			ENABLE_FN_HOOK(DetchmanResource_LoadFileEntry);
 	}
 
 	void UninitialiseDetchmanResourceHooks() {
-		if (!ctext::Config::Get().ModsEnabled)
+		if (!GetModsEnabledSafe())
 			return;
 
 		for (auto& ctp : loadedCtpArchives)
