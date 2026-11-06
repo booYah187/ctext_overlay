@@ -25,8 +25,9 @@ namespace {
 	std::unordered_map<std::string, ctext::io::FileEntry*> overridenFilepaths;
 
 	//[OVERLAY] Loose-file overlay fallback table: keys are
-	// "<option>/<value>/<original-path-lowercase>" (relative to mods/options/),
-	// populated by ScanLooseOptionOverlays() below. Kept separate from
+	// "<option>/<value>/<original-path>" normalized to lowercase with
+	// forward slashes (relative to mods/options/), populated by
+	// ScanLooseOptionOverlays() below. Kept separate from
 	// overridenFilepaths so mod overrides and option overrides never
 	// interact unintentionally.
 	std::unordered_map<std::string, ctext::io::FileEntry*> overridenOptionPaths;
@@ -68,31 +69,23 @@ namespace {
 	// First hit anywhere wins. No configured options, or an already-
 	// overlay ("options/") path => immediate pass-through.
 	uint8_t* TryOptionOverlay(
-
 		const std::string& originalPath,
 		size_t* outLen,
 		auto&& binProbe
 	) {
-    ctext::overlay::Options::InitLogging();
+		//[OVERLAY] ensure options are parsed (lazy, post-DllMain safe)
+		ctext::overlay::Options::InitLogging();
 
-    ctext::overlay::Options::Log("[overlay] resolve request: " + originalPath);
-		//[OVERLAY] debug logging
-		ctext::overlay::Options::Log("[overlay] resolve request: " + originalPath);
+		ctext::overlay::Options::Log(
+			"[overlay] resolve request: " + originalPath);
 
-		const auto& options = ctext::overlay::Options::Get();
-
-		if (options.Empty())
+		if (ctext::overlay::Options::Empty())
 			return nullptr;
 
 		if (ctext::overlay::Options::IsOverlayPath(originalPath))
 			return nullptr;
 
-		std::string lcOriginal = originalPath;
-		std::transform(
-			lcOriginal.begin(), lcOriginal.end(), lcOriginal.begin(),
-			[](unsigned char c) { return std::tolower(c); });
-
-		for (const auto& opt : options.List()) {
+		for (const auto& opt : ctext::overlay::Options::List()) {
 			// 1. resources.bin overlay entry (authoritative within this option).
 			auto binPath = ctext::overlay::BuildBinPath(opt, originalPath);
 
@@ -103,7 +96,7 @@ namespace {
 				return buf;
 
 			// 2. Loose-file fallback: mods/options/<name>/<value>/<path>.
-			auto key = ctext::overlay::BuildDiskKey(opt, lcOriginal);
+			auto key = ctext::overlay::BuildDiskKey(opt, originalPath);
 
 			//[OVERLAY] debug logging
 			ctext::overlay::Options::Log("[overlay]   disk probe: " + key);
@@ -194,9 +187,10 @@ namespace {
 
 export namespace ctext::hooks {
 	void InitialiseDetchmanResourceHooks() {
-		//[OVERLAY] Register loose option overlays and scan ctext.json for
-		// configured options. Both are no-ops when absent. Runs regardless
-		// of ModsEnabled so the overlay system works standalone.
+		//[OVERLAY] Register loose option overlays. No-op when the directory
+		// is absent. Runs regardless of ModsEnabled so the overlay system
+		// works standalone. (Options themselves are parsed lazily in
+		// TryOptionOverlay/Enable, which is post-DllMain safe.)
 		ScanLooseOptionOverlays();   //[OVERLAY] add
 
 		const auto& cfg = ctext::Config::Get();
@@ -252,13 +246,13 @@ export namespace ctext::hooks {
 	}
 
 	void EnableDetchmanResourceHooks() {
-		//[OVERLAY] CHANGED CONDITION: hook must also install when ONLY the
-		// overlay system is in use (ModsEnabled false, options configured).
-		// When nothing is configured the hook still installs but the
-		// TryOptionOverlay fast-path returns nullptr immediately and
-		// overridenFilepaths is empty, so behaviour remains identical to
-		// the unhooked game.
-		const bool overlayActive = !ctext::overlay::Options::Get().Empty();
+		//[OVERLAY] Parse options NOW (still post-DllMain, before the hook
+		// decision) so overlay-only setups install the hook even when
+		// ModsEnabled is false. This was the bug: under lazy parsing the
+		// Empty() check ran before any parse had happened.
+		ctext::overlay::Options::InitLogging();
+
+		const bool overlayActive = !ctext::overlay::Options::Empty();
 
 		if (ctext::Config::Get().ModsEnabled || overlayActive)
 			ENABLE_FN_HOOK(DetchmanResource_LoadFileEntry);
