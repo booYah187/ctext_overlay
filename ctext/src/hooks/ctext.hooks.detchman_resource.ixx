@@ -68,10 +68,14 @@ namespace {
 	// First hit anywhere wins. No configured options, or an already-
 	// overlay ("options/") path => immediate pass-through.
 	uint8_t* TryOptionOverlay(
+
 		const std::string& originalPath,
 		size_t* outLen,
 		auto&& binProbe
 	) {
+    ctext::overlay::Options::InitLogging();
+
+    ctext::overlay::Options::Log("[overlay] resolve request: " + originalPath);
 		//[OVERLAY] debug logging
 		ctext::overlay::Options::Log("[overlay] resolve request: " + originalPath);
 
