@@ -43,31 +43,70 @@ export namespace ctext::overlay {
 			return path.starts_with("options/");
 		}
 
+		// Debug helper: append a line to overlay_debug.log next to the
+		// game executable (current working directory at time of call).
+		static void Log(std::string_view line) {
+			std::ofstream dbg("overlay_debug.log", std::ios::app);
+			if (dbg)
+				dbg << line << "\n";
+		}
+
 	private:
 		Options() {
+			Log("[overlay] Options ctor: reading ctext.json...");
+
 			std::ifstream file("ctext.json");
-			if (!file)
+			if (!file) {
+				Log("[overlay] ERROR: could not open ctext.json in CWD");
 				return;
+			}
 
-			auto cfg = nlohmann::ordered_json::parse(
-				file, nullptr, true, true, true);
+			Log("[overlay] ctext.json opened OK");
 
-			if (!cfg.is_object() || !cfg.contains("options"))
-				return;
+			try {
+				auto cfg = nlohmann::ordered_json::parse(
+					file, nullptr, true, true, true);
 
-			const auto& opts = cfg["options"];
-			if (!opts.is_object())
-				return;
+				if (!cfg.is_object()) {
+					Log("[overlay] ERROR: ctext.json root is not an object");
+					return;
+				}
 
-			for (auto it = opts.begin(); it != opts.end(); ++it) {
-				if (!it.value().is_number_integer())
-					continue;
+				if (!cfg.contains("options")) {
+					Log("[overlay] no \"options\" key present -> overlay inert");
+					return;
+				}
 
-				const int value = it.value().get<int>();
-				if (value == 0)
-					continue;
+				const auto& opts = cfg["options"];
+				if (!opts.is_object()) {
+					Log("[overlay] ERROR: \"options\" is not an object");
+					return;
+				}
 
-				m_options.push_back({ it.key(), value });
+				for (auto it = opts.begin(); it != opts.end(); ++it) {
+					if (!it.value().is_number_integer()) {
+						Log("[overlay] skip \"" + it.key() +
+							"\": value is not an integer");
+						continue;
+					}
+
+					const int value = it.value().get<int>();
+					if (value == 0) {
+						Log("[overlay] skip \"" + it.key() +
+							"\": value is 0 (disabled)");
+						continue;
+					}
+
+					m_options.push_back({ it.key(), value });
+					Log("[overlay] option accepted: " + it.key() + " = " +
+						std::to_string(value));
+				}
+
+				Log("[overlay] total active options: " +
+					std::to_string(m_options.size()));
+			} catch (const std::exception& e) {
+				Log(std::string("[overlay] EXCEPTION parsing ctext.json: ") +
+					e.what());
 			}
 		}
 
