@@ -114,6 +114,8 @@
     <ClCompile Include="src\ctext.voice_acting_manager.ixx" />
     <ClCompile Include="src\sqex\sd\driver\sqex.sd.driver.ixx" />
     <ClCompile Include="src\sqex\sd\driver\sqex.sd.driver.sound_controller.ixx" />
+    <ClCompile Include="src\overlay\ctext.overlay.options.ixx" />
+    <ClCompile Include="src\overlay\ctext.overlay.resolver.ixx" />
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="deps\miniz\miniz.c">
