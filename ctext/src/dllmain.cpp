@@ -1,3 +1,5 @@
+module;
+
 #include <MinHook.h>
 
 #include <cstdio>
@@ -6,7 +8,6 @@
 
 import ctext.hooks;
 import ctext.config;
-import ctext.overlay.options;   //[OVERLAY] traces from dllmain
 
 
 // For DisableThreadLibraryCalls, LoadLibrary, GetSystemDirectory
@@ -49,24 +50,13 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD ul_reason_for_call, LPVOID lpReserv
 			CreateDebugConsole();
 			MH_Initialize();
 
-			//[OVERLAY] bracket traces: if the process dies between any two
-			// of these lines, the log tells us exactly which call killed it.
-			ctext::overlay::Options::Log("[dllmain] before InitialiseHooks");
 			ctext::hooks::InitialiseHooks();
-			ctext::overlay::Options::Log("[dllmain] after InitialiseHooks");
-
-			ctext::overlay::Options::Log("[dllmain] before EnableHooks");
 			ctext::hooks::EnableHooks();
-			ctext::overlay::Options::Log("[dllmain] after EnableHooks");
 
 			break;
 		}
 
 		case DLL_PROCESS_DETACH:
-			//[OVERLAY] trace detach: proves whether the DLL is unloaded
-			// early (which the loaddll trace suggested) and when.
-			ctext::overlay::Options::Log("[dllmain] DLL_PROCESS_DETACH");
-
 			ctext::hooks::UninitialiseHooks();
 
 			MH_Uninitialize();

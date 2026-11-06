@@ -17,8 +17,6 @@ import std;
 
 using namespace ct::addr;
 
-#define LOG_RES_HOOK 1
-
 
 namespace {
 	std::vector<mz_zip_archive*> loadedCtpArchives;
@@ -27,10 +25,14 @@ namespace {
 	//[OVERLAY] Loose-file overlay fallback table: keys are
 	// "<option>/<value>/<original-path>" lowercased with forward slashes
 	// (relative to mods/options/), populated by ScanLooseOptionOverlays().
+	// Kept separate from overridenFilepaths so mod overrides and option
+	// overrides never interact unintentionally.
 	std::unordered_map<std::string, ctext::io::FileEntry*> overridenOptionPaths;
 
 	//[OVERLAY] Walks mods/options/<name>/<value>/... and registers every file
-	// found there as a FilesystemFileEntry. Fully exception-guarded.
+	// found there as a FilesystemFileEntry. No-op when the directory is
+	// absent. Exception-guarded so filesystem errors during DLL load can
+	// never abort the process.
 	void ScanLooseOptionOverlays() {
 		const std::filesystem::path optionsRoot = "mods/options";
 
@@ -51,30 +53,27 @@ namespace {
 				overridenOptionPaths[rel] =
 					new ctext::io::FilesystemFileEntry(entry.path().string());
 			}
-			ctext::overlay::Options::Log(
-				"[overlay] loose option scan done (" +
-				std::to_string(overridenOptionPaths.size()) + " files)");
-		} catch (const std::exception& e) {
-			ctext::overlay::Options::Log(
-				std::string("[overlay] ERROR scanning mods/options: ") + e.what());
 		} catch (...) {
-			ctext::overlay::Options::Log(
-				"[overlay] ERROR scanning mods/options: unknown exception");
+			// Loose overlays are optional; any failure leaves the table
+			// partially populated at worst.
 		}
 	}
 
 	//[OVERLAY] The ported priority walk (ct_res_overlay_getdata_hook).
 	// Returns the winning buffer, or nullptr when no option provides the
 	// resource (caller then continues with normal handling).
+	//
+	// Per option, in config order:
+	//   1a. Bin probe, original case (PC resources.bin entry naming).
+	//   1b. Bin probe, lowercased (pm/nx-style bin naming fallback).
+	//   2.  Disk probe: mods/options/<name>/<value>/<path> (lowercased key).
+	// First hit wins. Bin is authoritative within an option.
 	uint8_t* TryOptionOverlay(
 		const std::string& originalPath,
 		size_t* outLen,
 		auto&& binProbe
 	) {
-		ctext::overlay::Options::InitLogging();
-
-		ctext::overlay::Options::Log(
-			"[overlay] resolve request: " + originalPath);
+		ctext::overlay::Options::InitOptions();
 
 		if (ctext::overlay::Options::Empty())
 			return nullptr;
@@ -83,21 +82,16 @@ namespace {
 			return nullptr;
 
 		for (const auto& opt : ctext::overlay::Options::List()) {
-			// 1a. resources.bin probe, original case (PC bin naming).
+			// 1a. resources.bin overlay entry, original case.
 			auto binPath = ctext::overlay::BuildBinPath(opt, originalPath);
-
-			ctext::overlay::Options::Log("[overlay]   bin probe: " + binPath);
 
 			if (uint8_t* buf = binProbe(binPath))
 				return buf;
 
-			// 1b. resources.bin probe, lowercased (pm/nx-style bin naming).
+			// 1b. resources.bin overlay entry, lowercased.
 			auto binPathLower = ctext::overlay::BuildBinPathLower(opt, originalPath);
 
 			if (binPathLower != binPath) {
-				ctext::overlay::Options::Log(
-					"[overlay]   bin probe (lc): " + binPathLower);
-
 				if (uint8_t* buf = binProbe(binPathLower))
 					return buf;
 			}
@@ -113,14 +107,14 @@ namespace {
 	}
 
 
-	//[OVERLAY] Safe config access (Config::Get() throws type_error.302 on
-	// null/missing boolean keys in ctext.json).
+	//[OVERLAY] Safe config access: Config::Get() throws json
+	// type_error.302 when a boolean key in ctext.json is null/absent,
+	// which would otherwise abort DLL load entirely. Falls back to
+	// defaults instead.
 	bool GetModsEnabledSafe() {
 		try {
 			return ctext::Config::Get().ModsEnabled;
-		} catch (const std::exception& e) {
-			ctext::overlay::Options::Log(
-				std::string("[overlay] Config::Get() threw: ") + e.what());
+		} catch (...) {
 			return false;
 		}
 	}
@@ -160,15 +154,10 @@ namespace {
 		DETCHMAN_RESOURCE_LOAD_FILE_ENTRY,
 		const std::string&, filename, size_t*, outLen
 	) {
-		//[OVERLAY] unconditional trace
-		ctext::overlay::Options::Log("[overlay] HOOK BODY: " + filename);
-
-#if LOG_RES_HOOK
-		LOG_DEBUG("RES_HOOK: " << filename);
-#endif
-
 		//[OVERLAY] Option overlay takes precedence over mod overrides and
-		// default assets.
+		// default assets. binProbe lambda = "call the ORIGINAL loader with
+		// a rewritten path" (the direct analogue of ct_pm's
+		// ct_res_overlay_try_path calling the getData trampoline).
 		if (uint8_t* buf = TryOptionOverlay(
 			    filename,
 			    outLen,
@@ -191,10 +180,6 @@ namespace {
 
 		const auto* entry = overridenFilepaths[lcFilename];
 
-#if LOG_RES_HOOK
-		LOG_DEBUG("RES_HOOK: Redirecting to " << entry->GetFilePath());
-#endif
-
 		auto* buf = entry->GetData(outLen);
 
 		return buf;
@@ -204,17 +189,15 @@ namespace {
 
 export namespace ctext::hooks {
 	void InitialiseDetchmanResourceHooks() {
-		//[OVERLAY] trace
-		ctext::overlay::Options::Log("[overlay] Initialise called");
-
-		//[OVERLAY] Register loose option overlays. Exception-guarded.
+		//[OVERLAY] Register loose option overlays and parse configured
+		// options. Both no-ops when absent. Runs regardless of ModsEnabled
+		// so the overlay system works standalone.
 		ScanLooseOptionOverlays();
 
-		//[OVERLAY] Parse options as early as possible (post-DllMain safe,
-		// logging demonstrably works during this window).
-		ctext::overlay::Options::InitLogging();
+		ctext::overlay::Options::InitOptions();
 
-		//[OVERLAY] Mod loading, fully guarded.
+		//[OVERLAY] Mod loading, guarded: a malformed ctext.json or broken
+		// mod directory must never abort DLL load.
 		try {
 			const bool modsEnabled = GetModsEnabledSafe();
 
@@ -265,33 +248,23 @@ export namespace ctext::hooks {
 						overridenFilepaths[str] = new io::FilesystemFileEntry(filePath.path().string());
 				}
 			}
-		} catch (const std::exception& e) {
-			ctext::overlay::Options::Log(
-				std::string("[overlay] EXCEPTION in mod loading: ") + e.what());
 		} catch (...) {
-			ctext::overlay::Options::Log(
-				"[overlay] UNKNOWN EXCEPTION in mod loading");
+			// Mod loading is optional; overlay functionality is unaffected.
 		}
 	}
 
 	void EnableDetchmanResourceHooks() {
-		//[OVERLAY] trace + ensure options parsed
-		ctext::overlay::Options::Log("[overlay] Enable called");
-
-		ctext::overlay::Options::InitLogging();
-
-		const bool modsEnabled = GetModsEnabledSafe();
+		//[OVERLAY] The hook must also install when ONLY the overlay system
+		// is in use (ModsEnabled false, options configured). When nothing
+		// is configured the hook still installs if mods are enabled, but
+		// TryOptionOverlay's fast-path returns nullptr immediately and
+		// overridenFilepaths is empty, so behaviour remains identical to
+		// the unhooked game.
+		ctext::overlay::Options::InitOptions();
 
 		const bool overlayActive = !ctext::overlay::Options::Empty();
 
-		ctext::overlay::Options::Log(
-			std::string("[overlay] ModsEnabled=") +
-			(modsEnabled ? "true" : "false"));
-		ctext::overlay::Options::Log(
-			std::string("[overlay] overlayActive=") +
-			(overlayActive ? "true" : "false"));
-
-		if (modsEnabled || overlayActive)
+		if (GetModsEnabledSafe() || overlayActive)
 			ENABLE_FN_HOOK(DetchmanResource_LoadFileEntry);
 	}
 
