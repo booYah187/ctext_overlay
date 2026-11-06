@@ -1,6 +1,19 @@
 module;
-
 #include <nlohmann/json.hpp>
+#include <Windows.h>
+
+// Replace the Log member with:
+static void Log(std::string_view line) {
+    static const std::string logPath = [] {
+        char exe[MAX_PATH]{};
+        GetModuleFileNameA(nullptr, exe, MAX_PATH);
+        std::string p(exe);
+        return p.substr(0, p.find_last_of("\\/") + 1) + std::string("overlay_debug.log");
+    }();
+    std::ofstream dbg(logPath, std::ios::app);
+    if (dbg)
+        dbg << line << "\n";
+}
 
 export module ctext.overlay.options;
 
