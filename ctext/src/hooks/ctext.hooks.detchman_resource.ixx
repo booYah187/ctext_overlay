@@ -10,7 +10,7 @@ export module ctext.hooks:detchman_resource;
 import ct.addr;
 import ctext.config;
 import ctext.io;
-import ctext.overlay.options;    //[OVERLAY] add
+import ctext.overlay.options;   //[OVERLAY] add
 import ctext.overlay.resolver;   //[OVERLAY] add
 
 import std;
@@ -34,9 +34,7 @@ namespace {
 
 	//[OVERLAY] Walks mods/options/<name>/<value>/... and registers every file
 	// found there as a FilesystemFileEntry. Fully exception-guarded: any
-	// error (bad permissions, weird filenames, filesystem races) is logged
-	// and swallowed instead of propagating during DLL load — an uncaught
-	// exception here can abort DllMain and cause the DLL to be UNLOADED.
+	// error is logged and swallowed instead of propagating during DLL load.
 	void ScanLooseOptionOverlays() {
 		const std::filesystem::path optionsRoot = "mods/options";
 
@@ -77,7 +75,7 @@ namespace {
 		size_t* outLen,
 		auto&& binProbe
 	) {
-		//[OVERLAY] ensure options are parsed (lazy, post-DllMain safe)
+		//[OVERLAY] ensure options are parsed
 		ctext::overlay::Options::InitLogging();
 
 		ctext::overlay::Options::Log(
@@ -112,6 +110,9 @@ namespace {
 
 
 	void LoadCtpArchive(const std::filesystem::path& path) {
+		ctext::overlay::Options::Log(
+			"[overlay] LoadCtpArchive: " + path.generic_string());
+
 		const auto ctpFilename = path.generic_string();
 
 		auto ctp = new mz_zip_archive{ 0 };
@@ -137,6 +138,9 @@ namespace {
 				static_cast<size_t>(fileStat.m_uncomp_size)
 			);
 		}
+
+		ctext::overlay::Options::Log(
+			"[overlay] LoadCtpArchive done: " + ctpFilename);
 	}
 
 
@@ -190,66 +194,105 @@ namespace {
 
 export namespace ctext::hooks {
 	void InitialiseDetchmanResourceHooks() {
-		//[OVERLAY] unconditional trace: proves this module's init runs at all
+		//[OVERLAY] unconditional trace
 		ctext::overlay::Options::Log("[overlay] Initialise called");
 
-		//[OVERLAY] Register loose option overlays. No-op when the directory
-		// is absent. Exception-guarded internally (see ScanLooseOptionOverlays).
+		//[OVERLAY] Register loose option overlays. Exception-guarded.
 		ScanLooseOptionOverlays();   //[OVERLAY] add
 
-		const auto& cfg = ctext::Config::Get();
+		//[OVERLAY] Everything below this point is mod loading, which has
+		// been determined to be where the process dies. Wrap the ENTIRE
+		// section in try/catch: mod-loading failures must never abort DLL
+		// load or take the overlay system down with them. Fine-grained
+		// traces bisect exactly which step dies.
+		try {
+			ctext::overlay::Options::Log("[overlay] init: about to Config::Get()");
 
-		if (!cfg.ModsEnabled)
-			return;
+			const auto& cfg = ctext::Config::Get();
 
-		if (!std::filesystem::exists("mods"))
-			return;
+			ctext::overlay::Options::Log(
+				std::string("[overlay] init: ModsEnabled=") +
+				(cfg.ModsEnabled ? "true" : "false"));
 
-		const auto& loadOrder = ctext::Config::Get().ModsLoadOrder;
+			if (!cfg.ModsEnabled)
+				return;
 
-		for (const auto& load : loadOrder) {
-			auto modPath = "mods" / std::filesystem::path(load);
+			if (!std::filesystem::exists("mods")) {
+				ctext::overlay::Options::Log("[overlay] init: no mods dir");
+				return;
+			}
 
-			if (cfg.ModsEnableCtpLoading) {
-				std::filesystem::path ctpPath(modPath);
-				ctpPath.replace_extension(".ctp");
+			ctext::overlay::Options::Log("[overlay] init: iterating mod load order");
 
-				if (std::filesystem::exists(ctpPath)) {
-					LoadCtpArchive(ctpPath);
+			const auto& loadOrder = ctext::Config::Get().ModsLoadOrder;
 
+			ctext::overlay::Options::Log(
+				"[overlay] init: load order size=" +
+				std::to_string(loadOrder.size()));
+
+			for (const auto& load : loadOrder) {
+				auto modPath = "mods" / std::filesystem::path(load);
+
+				ctext::overlay::Options::Log(
+					"[overlay] init: processing mod '" + load + "'");
+
+				if (cfg.ModsEnableCtpLoading) {
+					std::filesystem::path ctpPath(modPath);
+					ctpPath.replace_extension(".ctp");
+
+					if (std::filesystem::exists(ctpPath)) {
+						LoadCtpArchive(ctpPath);
+
+						continue;
+					}
+				}
+
+				if (!std::filesystem::exists(modPath)) {
+					LOG_ERROR("Mod path not found '" << load << "'!");
+					ctext::overlay::Options::Log(
+						"[overlay] init: mod path not found '" + load + "'");
 					continue;
 				}
+
+				ctext::overlay::Options::Log(
+					"[overlay] init: walking loose mod dir '" + load + "'");
+
+				const auto iter = std::filesystem::recursive_directory_iterator(modPath);
+
+				for (const auto& filePath : iter) {
+					if (!filePath.is_regular_file())
+						continue;
+
+					const auto relPath = filePath.path().lexically_relative(modPath);
+
+					auto pattern = std::filesystem::path(relPath);
+
+					if (pattern.extension() == ".mp3" || pattern.extension() == ".ogg")
+						pattern.replace_extension(".sab");
+
+					auto str = pattern.generic_string();
+					std::transform(str.begin(), str.end(), str.begin(), [](unsigned char c) { return std::tolower(c); });
+
+					if (!overridenFilepaths.contains(str))
+						overridenFilepaths[str] = new io::FilesystemFileEntry(filePath.path().string());
+				}
+
+				ctext::overlay::Options::Log(
+					"[overlay] init: mod done '" + load + "'");
 			}
 
-			if (!std::filesystem::exists(modPath)) {
-				LOG_ERROR("Mod path not found '" << load << "'!");
-				continue;
-			}
-
-			const auto iter = std::filesystem::recursive_directory_iterator(modPath);
-
-			for (const auto& filePath : iter) {
-				if (!filePath.is_regular_file())
-					continue;
-
-				const auto relPath = filePath.path().lexically_relative(modPath);
-
-				auto pattern = std::filesystem::path(relPath);
-
-				if (pattern.extension() == ".mp3" || pattern.extension() == ".ogg")
-					pattern.replace_extension(".sab");
-
-				auto str = pattern.generic_string();
-				std::transform(str.begin(), str.end(), str.begin(), [](unsigned char c) { return std::tolower(c); });
-
-				if (!overridenFilepaths.contains(str))
-					overridenFilepaths[str] = new io::FilesystemFileEntry(filePath.path().string());
-			}
+			ctext::overlay::Options::Log("[overlay] init: mod loading complete");
+		} catch (const std::exception& e) {
+			ctext::overlay::Options::Log(
+				std::string("[overlay] EXCEPTION in mod loading: ") + e.what());
+		} catch (...) {
+			ctext::overlay::Options::Log(
+				"[overlay] UNKNOWN EXCEPTION in mod loading");
 		}
 	}
 
 	void EnableDetchmanResourceHooks() {
-		//[OVERLAY] unconditional trace + force-parse options (post-DllMain)
+		//[OVERLAY] unconditional trace + ensure options parsed
 		ctext::overlay::Options::Log("[overlay] Enable called");
 
 		ctext::overlay::Options::InitLogging();
