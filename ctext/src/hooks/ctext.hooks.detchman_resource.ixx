@@ -90,16 +90,18 @@ namespace {
 			// 1. resources.bin overlay entry (authoritative within this option).
 			auto binPath = ctext::overlay::BuildBinPath(opt, originalPath);
 			if (uint8_t* buf = binProbe(binPath))
+		ctext::overlay::Options::Log("[overlay]   bin probe: " + binPath);
+
 				return buf;
 
-		ctext::overlay::Options::Log("[overlay]   bin probe: " + binPath);
 
 			// 2. Loose-file fallback: mods/options/<name>/<value>/<path>.
 			auto key = ctext::overlay::BuildDiskKey(opt, lcOriginal);
 			if (overridenOptionPaths.contains(key))
 				return overridenOptionPaths[key]->GetData(outLen);
-		}
 		ctext::overlay::Options::Log("[overlay]   disk probe: " + key);
+
+		}
 		return nullptr;
 	}
 
