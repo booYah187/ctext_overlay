@@ -19,9 +19,8 @@ export namespace ctext::overlay {
 	public:
 		// inline static members: no out-of-class definitions needed
 		inline static std::vector<Option> s_options{};
-		inline static FILE* s_con_out = nullptr;
-		inline static FILE* s_con_err = nullptr;
 		inline static bool s_initialized = false;
+		inline static bool s_loggedExe = false;
 
 		static bool Empty() { return s_options.empty(); }
 		static const std::vector<Option>& List() { return s_options; }
@@ -30,16 +29,10 @@ export namespace ctext::overlay {
 			return path.starts_with("options/");
 		}
 
-		// Runs on first asset load (after DllMain), parses ctext.json
-		// "options" block and initializes debug logging/console.
+		// Runs on first asset load / hook enable (post-DllMain safe).
 		static void InitLogging() {
 			if (s_initialized) return;
 			s_initialized = true;
-
-			// Debug console (harmless if it fails)
-			AllocConsole();
-			freopen_s(&s_con_out, "CONOUT$", "w", stdout);
-			freopen_s(&s_con_err, "CONOUT$", "w", stderr);
 
 			Log("[overlay] init (post-DllMain)");
 			Log("[overlay] reading ctext.json...");
@@ -93,23 +86,86 @@ export namespace ctext::overlay {
 			}
 		}
 
+		// Debug helper: appends to overlay_debug.log. Tries, in order:
+		//   1. next to the game executable
+		//   2. current working directory
+		//   3. %TEMP%
+		// The first location that succeeds is cached and reused. If ALL
+		// fail, a single "write-failed" line is sent to OutputDebugStringA
+		// (visible in Wine's stderr / winedbg) so silence is never total.
 		static void Log(std::string_view line) {
-			static const std::string logPath = [] {
+			static int location = -1; // -1 = undecided
+
+			if (location == -1) {
 				char exe[MAX_PATH]{};
 				GetModuleFileNameA(nullptr, exe, MAX_PATH);
+				Log("[overlay] exe: " + std::string(exe));
+
 				std::string p(exe);
 				auto slash = p.find_last_of("\\/");
-				return (slash == std::string::npos
-					? std::string(".")
-					: p.substr(0, slash + 1)) + "overlay_debug.log";
-			}();
+				std::string base = (slash == std::string::npos)
+					? std::string(".") : p.substr(0, slash + 1);
 
+				// probe 1: exe dir
+				FILE* f = nullptr;
+				fopen_s(&f, (base + "overlay_debug.log").c_str(), "a");
+				if (f) { fclose(f); location = 0; s_loggedExe = true; }
+				else {
+					// probe 2: cwd (already covered by relative open below
+					// but probe to decide routing)
+					fopen_s(&f, "overlay_debug.log", "a");
+					if (f) { fclose(f); location = 1; }
+					else {
+						char tempBuf[MAX_PATH]{};
+						GetTempPathA(MAX_PATH, tempBuf);
+						// probe 3: temp
+						fopen_s(&f, (std::string(tempBuf) + "ctext_overlay_debug.log").c_str(), "a");
+						if (f) { fclose(f); location = 2; }
+						else location = 3; // nowhere writable
+					}
+				}
+			}
+
+			switch (location) {
+				case 0: {
+					char exe[MAX_PATH]{};
+					GetModuleFileNameA(nullptr, exe, MAX_PATH);
+					std::string p(exe);
+					auto slash = p.find_last_of("\\/");
+					WriteLine((slash == std::string::npos
+						? std::string(".") : p.substr(0, slash + 1))
+						+ "overlay_debug.log", line);
+					break;
+				}
+				case 1:
+					WriteLine("overlay_debug.log", line);
+					break;
+				case 2: {
+					char tempBuf[MAX_PATH]{};
+					GetTempPathA(MAX_PATH, tempBuf);
+					WriteLine(std::string(tempBuf) + "ctext_overlay_debug.log", line);
+					break;
+				}
+				default:
+					OutputDebugStringA("[overlay] LOG WRITE FAILED: ");
+					OutputDebugStringA(line.data());
+					OutputDebugStringA("\n");
+					break;
+			}
+		}
+
+	private:
+		static void WriteLine(const std::string& path, std::string_view line) {
 			FILE* f = nullptr;
-			fopen_s(&f, logPath.c_str(), "a");
+			fopen_s(&f, path.c_str(), "a");
 			if (f) {
 				fwrite(line.data(), 1, line.size(), f);
 				fputc('\n', f);
 				fclose(f);
+			} else {
+				OutputDebugStringA("[overlay] LOG WRITE FAILED (regression): ");
+				OutputDebugStringA(line.data());
+				OutputDebugStringA("\n");
 			}
 		}
 	};
