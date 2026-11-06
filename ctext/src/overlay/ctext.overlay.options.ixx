@@ -1,3 +1,6 @@
+CText Overlay Options Lazy Init · cpp
+
+
 module;
 #include <nlohmann/json.hpp>
 #include <Windows.h>
@@ -23,8 +26,11 @@ export namespace ctext::overlay {
 			return instance;
 		}
 
-		const std::vector<Option>& List() const { return m_options; }
-		bool Empty() const { return m_options.empty(); }
+		// NOTE: static storage so static functions (InitLogging, Log)
+		// can access it without a `this` pointer.
+		static std::vector<Option>& MutableList() { return s_options; }
+		static bool Empty() { return s_options.empty(); }
+		static const std::vector<Option>& List() { return s_options; }
 
 		static bool IsOverlayPath(std::string_view path) {
 			return path.starts_with("options/");
@@ -39,8 +45,8 @@ export namespace ctext::overlay {
 
 			// Force console allocation now (safer than DllMain)
 			AllocConsole();
-			freopen_s(&_con_out, "CONOUT$", "w", stdout);
-			freopen_s(&_con_err, "CONOUT$", "w", stderr);
+			freopen_s(&s_con_out, "CONOUT$", "w", stdout);
+			freopen_s(&s_con_err, "CONOUT$", "w", stderr);
 
 			Log("[overlay] Logging initialized (post-DllMain)");
 			Log("[overlay] Reading ctext.json...");
@@ -87,13 +93,13 @@ export namespace ctext::overlay {
 						continue;
 					}
 
-					m_options.push_back({ it.key(), value });
+					s_options.push_back({ it.key(), value });
 					Log("[overlay] option accepted: " + it.key() + " = " +
 						std::to_string(value));
 				}
 
 				Log("[overlay] total active options: " +
-					std::to_string(m_options.size()));
+					std::to_string(s_options.size()));
 			} catch (const std::exception& e) {
 				Log(std::string("[overlay] EXCEPTION parsing ctext.json: ") +
 					e.what());
@@ -101,7 +107,7 @@ export namespace ctext::overlay {
 		}
 
 		// Debug helper: append a line to overlay_debug.log next to the
-		// game executable (current working directory at time of call).
+		// game executable.
 		static void Log(std::string_view line) {
 			static const std::string logPath = [] {
 				char exe[MAX_PATH]{};
@@ -127,12 +133,13 @@ export namespace ctext::overlay {
 			// This prevents DllMain issues.
 		}
 
-		std::vector<Option> m_options;
-		static FILE* _con_out;
-		static FILE* _con_err;
+		static std::vector<Option> s_options;
+		static FILE* s_con_out;
+		static FILE* s_con_err;
 	};
-	
-	// Static members
-	FILE* Options::_con_out = nullptr;
-	FILE* Options::_con_err = nullptr;
+
+	// Static member definitions (file-local to this module unit)
+	static std::vector<Option> Options::s_options{};
+	static FILE* Options::s_con_out = nullptr;
+	static FILE* Options::s_con_err = nullptr;
 }
