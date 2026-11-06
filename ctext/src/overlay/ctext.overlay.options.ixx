@@ -17,10 +17,8 @@ export namespace ctext::overlay {
 
 	class Options final {
 	public:
-		// inline static members: no out-of-class definitions needed
 		inline static std::vector<Option> s_options{};
 		inline static bool s_initialized = false;
-		inline static bool s_loggedExe = false;
 
 		static bool Empty() { return s_options.empty(); }
 		static const std::vector<Option>& List() { return s_options; }
@@ -86,55 +84,23 @@ export namespace ctext::overlay {
 			}
 		}
 
-		// Debug helper: appends to overlay_debug.log. Tries, in order:
+		// Appends to overlay_debug.log. Tries, in order:
 		//   1. next to the game executable
 		//   2. current working directory
 		//   3. %TEMP%
-		// The first location that succeeds is cached and reused. If ALL
-		// fail, a single "write-failed" line is sent to OutputDebugStringA
-		// (visible in Wine's stderr / winedbg) so silence is never total.
+		// The first location that accepts a write is cached. NOTE: there is
+		// NO recursion here — the location probe calls WriteLine directly.
+		// (A previous version called Log() inside the probe block while
+		// location was still undecided, causing infinite recursion.)
 		static void Log(std::string_view line) {
-			static int location = -1; // -1 = undecided
-
-			if (location == -1) {
-				char exe[MAX_PATH]{};
-				GetModuleFileNameA(nullptr, exe, MAX_PATH);
-				Log("[overlay] exe: " + std::string(exe));
-
-				std::string p(exe);
-				auto slash = p.find_last_of("\\/");
-				std::string base = (slash == std::string::npos)
-					? std::string(".") : p.substr(0, slash + 1);
-
-				// probe 1: exe dir
-				FILE* f = nullptr;
-				fopen_s(&f, (base + "overlay_debug.log").c_str(), "a");
-				if (f) { fclose(f); location = 0; s_loggedExe = true; }
-				else {
-					// probe 2: cwd (already covered by relative open below
-					// but probe to decide routing)
-					fopen_s(&f, "overlay_debug.log", "a");
-					if (f) { fclose(f); location = 1; }
-					else {
-						char tempBuf[MAX_PATH]{};
-						GetTempPathA(MAX_PATH, tempBuf);
-						// probe 3: temp
-						fopen_s(&f, (std::string(tempBuf) + "ctext_overlay_debug.log").c_str(), "a");
-						if (f) { fclose(f); location = 2; }
-						else location = 3; // nowhere writable
-					}
-				}
-			}
+			// Decide routing once. std::optional-style: -1 undecided,
+			// 0..2 = location index, 3 = nowhere writable.
+			static int location = DecideLocation();
 
 			switch (location) {
 				case 0: {
-					char exe[MAX_PATH]{};
-					GetModuleFileNameA(nullptr, exe, MAX_PATH);
-					std::string p(exe);
-					auto slash = p.find_last_of("\\/");
-					WriteLine((slash == std::string::npos
-						? std::string(".") : p.substr(0, slash + 1))
-						+ "overlay_debug.log", line);
+					std::string base = ExeDir();
+					WriteLine(base + "overlay_debug.log", line);
 					break;
 				}
 				case 1:
@@ -155,6 +121,37 @@ export namespace ctext::overlay {
 		}
 
 	private:
+		static std::string ExeDir() {
+			char exe[MAX_PATH]{};
+			GetModuleFileNameA(nullptr, exe, MAX_PATH);
+			std::string p(exe);
+			auto slash = p.find_last_of("\\/");
+			return (slash == std::string::npos)
+				? std::string(".") : p.substr(0, slash + 1);
+		}
+
+		// Pure probe: decides the routing index. Never calls Log().
+		static int DecideLocation() {
+			// probe 1: exe dir
+			FILE* f = nullptr;
+			std::string p1 = ExeDir() + "overlay_probe.tmp";
+			fopen_s(&f, p1.c_str(), "w");
+			if (f) { fclose(f); DeleteFileA(p1.c_str()); return 0; }
+
+			// probe 2: cwd
+			fopen_s(&f, "overlay_probe.tmp", "w");
+			if (f) { fclose(f); DeleteFileA("overlay_probe.tmp"); return 1; }
+
+			// probe 3: temp
+			char tempBuf[MAX_PATH]{};
+			GetTempPathA(MAX_PATH, tempBuf);
+			std::string p3 = std::string(tempBuf) + "overlay_probe.tmp";
+			fopen_s(&f, p3.c_str(), "w");
+			if (f) { fclose(f); DeleteFileA(p3.c_str()); return 2; }
+
+			return 3;
+		}
+
 		static void WriteLine(const std::string& path, std::string_view line) {
 			FILE* f = nullptr;
 			fopen_s(&f, path.c_str(), "a");
@@ -163,7 +160,7 @@ export namespace ctext::overlay {
 				fputc('\n', f);
 				fclose(f);
 			} else {
-				OutputDebugStringA("[overlay] LOG WRITE FAILED (regression): ");
+				OutputDebugStringA("[overlay] LOG WRITE FAILED: ");
 				OutputDebugStringA(line.data());
 				OutputDebugStringA("\n");
 			}
