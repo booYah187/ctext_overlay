@@ -68,11 +68,13 @@ namespace {
 	// First hit anywhere wins. No configured options, or an already-
 	// overlay ("options/") path => immediate pass-through.
 	uint8_t* TryOptionOverlay(
-		ctext::overlay::Options::Log("[overlay] resolve request: " + originalPath);
 		const std::string& originalPath,
 		size_t* outLen,
 		auto&& binProbe
 	) {
+		//[OVERLAY] debug logging
+		ctext::overlay::Options::Log("[overlay] resolve request: " + originalPath);
+
 		const auto& options = ctext::overlay::Options::Get();
 
 		if (options.Empty())
@@ -89,19 +91,23 @@ namespace {
 		for (const auto& opt : options.List()) {
 			// 1. resources.bin overlay entry (authoritative within this option).
 			auto binPath = ctext::overlay::BuildBinPath(opt, originalPath);
+
+			//[OVERLAY] debug logging
+			ctext::overlay::Options::Log("[overlay]   bin probe: " + binPath);
+
 			if (uint8_t* buf = binProbe(binPath))
-		ctext::overlay::Options::Log("[overlay]   bin probe: " + binPath);
-
 				return buf;
-
 
 			// 2. Loose-file fallback: mods/options/<name>/<value>/<path>.
 			auto key = ctext::overlay::BuildDiskKey(opt, lcOriginal);
+
+			//[OVERLAY] debug logging
+			ctext::overlay::Options::Log("[overlay]   disk probe: " + key);
+
 			if (overridenOptionPaths.contains(key))
 				return overridenOptionPaths[key]->GetData(outLen);
-		ctext::overlay::Options::Log("[overlay]   disk probe: " + key);
-
 		}
+
 		return nullptr;
 	}
 
